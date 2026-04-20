@@ -10,6 +10,7 @@ class ConfigurationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class MySQLSettings:
+    # 这里集中保存运行 MCP 所需的数据库配置。
     host: str
     port: int
     user: str
@@ -23,6 +24,7 @@ class MySQLSettings:
 
     @classmethod
     def from_env(cls) -> "MySQLSettings":
+        # 所有配置统一从环境变量读取，避免把敏感信息写死在代码里。
         host = _get_required_env("MYSQL_HOST")
         user = _get_required_env("MYSQL_USER")
         password = _get_required_env("MYSQL_PASSWORD")
@@ -53,6 +55,7 @@ class MySQLSettings:
         )
 
     def connection_kwargs(self, database: str | None = None) -> dict[str, object]:
+        # 统一生成 pymysql.connect 所需参数，业务代码就不用到处拼装连接配置。
         selected_database = database if database is not None else self.database
         kwargs: dict[str, object] = {
             "host": self.host,
@@ -69,6 +72,7 @@ class MySQLSettings:
 
 
 def _get_required_env(name: str) -> str:
+    # 必填配置缺失时直接报错，避免连库时才出现更模糊的问题。
     value = os.getenv(name, "").strip()
     if not value:
         raise ConfigurationError(f"Missing required environment variable: {name}")
@@ -81,6 +85,7 @@ def _get_optional_env(name: str) -> str | None:
 
 
 def _get_int_env(name: str, *, default: int, minimum: int) -> int:
+    # 统一做整数配置解析和下限校验。
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -94,6 +99,7 @@ def _get_int_env(name: str, *, default: int, minimum: int) -> int:
 
 
 def _get_bool_env(name: str, *, default: bool) -> bool:
+    # 允许常见的 true/false、1/0 写法，方便不同环境配置。
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default

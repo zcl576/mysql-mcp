@@ -6,6 +6,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mysql_mcp.core import MySQLService
 
+# FastMCP 负责把普通 Python 函数暴露成 MCP 工具。
 mcp = FastMCP(
     "MySQL Query MCP",
     instructions=(
@@ -17,6 +18,7 @@ mcp = FastMCP(
 
 
 def _service() -> MySQLService:
+    # 每次工具调用时按当前环境配置创建 service。
     return MySQLService.from_env()
 
 
@@ -29,6 +31,7 @@ def execute_sql(
 ) -> dict[str, Any]:
     """Execute one SQL statement against MySQL."""
 
+    # 自由 SQL 执行入口，适合复杂查询。
     return _service().execute_sql(sql=sql, params=params, database=database, limit=limit)
 
 
@@ -36,6 +39,7 @@ def execute_sql(
 def list_tables(database: str | None = None) -> dict[str, Any]:
     """List tables for the configured database or an explicitly provided one."""
 
+    # 结构化工具优先于自由 SQL，更适合让模型稳定调用。
     return _service().list_tables(database=database)
 
 
@@ -76,6 +80,7 @@ def explain_sql(
 
 
 def main() -> None:
+    # 这里使用 stdio 传输，适合本地 MCP 客户端直接拉起子进程接入。
     mcp.run(transport="stdio")
 
 

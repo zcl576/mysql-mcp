@@ -27,6 +27,7 @@ class DatabaseSelectionError(MySQLMcpError):
 
 
 def serialize_value(value: Any) -> JsonValue:
+    # 把 MySQL 查询结果转换成稳定的 JSON 结构，便于 MCP 客户端消费。
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Decimal):
@@ -44,6 +45,7 @@ def serialize_value(value: Any) -> JsonValue:
 
 
 def ensure_single_statement(sql: str) -> str:
+    # MCP 对外只允许执行一条 SQL，避免拼接多语句带来风险。
     candidate = sql.strip()
     if not candidate:
         raise StatementValidationError("SQL cannot be empty.")
@@ -65,6 +67,7 @@ def ensure_single_statement(sql: str) -> str:
 
 
 def normalize_params(params: Mapping[str, Any] | Sequence[Any] | None) -> Mapping[str, Any] | Sequence[Any] | None:
+    # 统一把参数规范成 dict / list / None 三种形态。
     if params is None:
         return None
     if isinstance(params, Mapping):
@@ -75,6 +78,7 @@ def normalize_params(params: Mapping[str, Any] | Sequence[Any] | None) -> Mappin
 
 
 def detect_statement_type(sql: str) -> str:
+    # 取 SQL 第一个关键字，用来判断是查询还是写入语句。
     parts = sql.lstrip().split(None, 1)
     if not parts:
         raise StatementValidationError("SQL cannot be empty.")
@@ -82,6 +86,7 @@ def detect_statement_type(sql: str) -> str:
 
 
 def normalize_limit(limit: int | None, settings: MySQLSettings) -> int:
+    # 所有对外的 limit 都走同一套默认值和上限校验。
     if limit is None:
         return settings.query_default_limit
     if not isinstance(limit, int):
@@ -96,6 +101,7 @@ def normalize_limit(limit: int | None, settings: MySQLSettings) -> int:
 
 
 def ensure_allowed_statement(sql: str, settings: MySQLSettings) -> None:
+    # 只读模式下只放行安全查询语句，避免模型误执行写操作。
     if not settings.read_only:
         return
 
@@ -114,6 +120,7 @@ class MySQLService:
 
     @classmethod
     def from_env(cls) -> "MySQLService":
+        # Service 只是配置 + 行为的薄封装，实例化入口统一走环境变量。
         try:
             settings = MySQLSettings.from_env()
         except ConfigurationError as exc:
@@ -127,6 +134,10 @@ class MySQLService:
         database: str | None = None,
         limit: int | None = None,
     ) -> dict[str, Any]:
+        # 主执行流程：
+        # 1. 校验 SQL 和参数
+        # 2. 建立连接
+        # 3. 执行并按“查询 / 写入”两种结果结构返回
         normalized_sql = ensure_single_statement(sql)
         normalized_params = normalize_params(params)
         ensure_allowed_statement(normalized_sql, self.settings)
@@ -139,6 +150,7 @@ class MySQLService:
                 cursor.execute(normalized_sql, normalized_params)
                 warnings = self._fetch_warnings(connection)
                 if cursor.description is not None:
+                    # 有 description 说明这是一条会返回结果集的语句。
                     raw_rows = cursor.fetchmany(normalized_limit + 1)
                     has_more = len(raw_rows) > normalized_limit
                     rows = [serialize_value(row) for row in raw_rows[:normalized_limit]]
@@ -154,6 +166,7 @@ class MySQLService:
                     }
 
                 connection.commit()
+                # 没有结果集时按写操作结构返回影响行数和自增 ID。
                 return {
                     "statement_type": statement_type,
                     "affected_rows": cursor.rowcount,
@@ -167,6 +180,7 @@ class MySQLService:
             connection.close()
 
     def list_tables(self, database: str | None = None) -> dict[str, Any]:
+        # 通过 information_schema 取表列表，比让模型手写 SQL 更稳定。
         resolved_database = self._require_database(database)
         result = self.execute_sql(
             """
@@ -187,6 +201,7 @@ class MySQLService:
         }
 
     def list_databases(self) -> dict[str, Any]:
+        # 返回当前账号可见的数据库列表。
         result = self.execute_sql(
             """
             SELECT SCHEMA_NAME AS database_name
@@ -203,6 +218,7 @@ class MySQLService:
         }
 
     def describe_table(self, table_name: str, database: str | None = None) -> dict[str, Any]:
+        # 返回字段名、类型、是否可空等信息，适合作为建表结构查看工具。
         normalized_table_name = table_name.strip()
         if not normalized_table_name:
             raise StatementValidationError("table_name cannot be empty.")
@@ -243,6 +259,7 @@ class MySQLService:
         database: str | None = None,
         limit: int | None = None,
     ) -> dict[str, Any]:
+        # 给模型一个“安全预览表数据”的入口，避免每次自己拼 SELECT *。
         normalized_table_name = table_name.strip()
         if not normalized_table_name:
             raise StatementValidationError("table_name cannot be empty.")
@@ -263,6 +280,7 @@ class MySQLService:
         params: Mapping[str, Any] | Sequence[Any] | None = None,
         database: str | None = None,
     ) -> dict[str, Any]:
+        # 用 EXPLAIN 查看执行计划，只接受查询类语句。
         normalized_sql = ensure_single_statement(sql)
         ensure_allowed_statement(normalized_sql, self.settings)
         statement_type = detect_statement_type(normalized_sql)
@@ -278,12 +296,14 @@ class MySQLService:
         )
 
     def _connect(self, database: str | None = None) -> pymysql.connections.Connection:
+        # 底层连接异常统一翻译成更友好的业务错误。
         try:
             return pymysql.connect(**self.settings.connection_kwargs(database))
         except pymysql.MySQLError as exc:
             raise self._translate_mysql_error(exc) from exc
 
     def _require_database(self, database: str | None) -> str:
+        # 某些工具必须明确落到某个数据库上，这里统一兜底校验。
         resolved = database.strip() if database else self.settings.database
         if not resolved:
             raise DatabaseSelectionError(
@@ -293,6 +313,7 @@ class MySQLService:
 
     @staticmethod
     def _fetch_warnings(connection: pymysql.connections.Connection) -> list[dict[str, JsonValue]]:
+        # MySQL 的 warning 结构不完全稳定，这里统一序列化成字典列表。
         try:
             raw_warnings = connection.show_warnings() or []
         except pymysql.MySQLError:
@@ -320,6 +341,7 @@ class MySQLService:
 
     @staticmethod
     def _rollback_quietly(connection: pymysql.connections.Connection) -> None:
+        # 写操作失败时尽量回滚，但不让回滚本身的异常覆盖原始错误。
         try:
             connection.rollback()
         except Exception:
@@ -327,6 +349,7 @@ class MySQLService:
 
     @staticmethod
     def _translate_mysql_error(exc: pymysql.MySQLError) -> MySQLMcpError:
+        # 把底层数据库错误码映射成更容易理解的提示。
         code = exc.args[0] if exc.args else None
         detail = exc.args[1] if len(exc.args) > 1 else str(exc)
 
@@ -353,6 +376,7 @@ class MySQLService:
 
 
 def _find_top_level_semicolon(sql: str) -> int:
+    # 在不进入字符串 / 注释的前提下，寻找真正表示“多语句”的分号。
     in_single = False
     in_double = False
     in_backtick = False
@@ -437,6 +461,7 @@ def _find_top_level_semicolon(sql: str) -> int:
 
 
 def _has_meaningful_sql_content(fragment: str) -> bool:
+    # 用来判断分号后面是否还有真正的 SQL 内容，而不只是空白或注释。
     in_line_comment = False
     in_block_comment = False
     index = 0
@@ -480,6 +505,7 @@ def _has_meaningful_sql_content(fragment: str) -> bool:
 
 
 def _line_comment_start(sql: str, index: int) -> bool:
+    # MySQL 的 -- 注释要求前后是空白边界，这里单独抽出来判断。
     previous_char = sql[index - 1] if index > 0 else ""
     following_char = sql[index + 2] if index + 2 < len(sql) else ""
     previous_ok = not previous_char or previous_char.isspace()
@@ -488,6 +514,7 @@ def _line_comment_start(sql: str, index: int) -> bool:
 
 
 def _quote_identifier(identifier: str) -> str:
+    # 预览表数据时不能直接拼裸字符串，这里先做标识符白名单校验再加反引号。
     normalized = identifier.strip()
     if not normalized:
         raise StatementValidationError("Identifier cannot be empty.")
